@@ -1,14 +1,18 @@
 //
-// *    *    *    *    *    *
-// ┬    ┬    ┬    ┬    ┬    ┬
-// │    │    │    │    │    |
-// │    │    │    │    │    └ day of week (0 - 7, 1L - 7L) (0 or 7 is Sun)
-// │    │    │    │    └───── month (1 - 12)
-// │    │    │    └────────── day of month (1 - 31, L)
-// │    │    └─────────────── hour (0 - 23)
-// │    └──────────────────── minute (0 - 59)
-// └───────────────────────── second (0 - 59, optional)
+// *    *    *    *    *
+// ┬    ┬    ┬    ┬    ┬
+// │    │    │    │    |
+// │    │    │    │    └ day of week (0 - 7, 1L - 7L) (0 or 7 is Sun)
+// │    │    │    └───── month (1 - 12)
+// │    │    └────────── day of month (1 - 31, L)
+// │    └─────────────── hour (0 - 23)
+// └──────────────────── minute (0 - 59)
 //
+
+const debug = false
+const log = debug ? console.log.bind(console) : () => {}
+
+import { assert } from 'https://deno.land/std@0.206.0/assert/assert.ts'
 
 export enum FieldType {
   ANY,
@@ -18,100 +22,185 @@ export enum FieldType {
   EXACT
 }
 
-type Range = [number, number]
-
-function* range([min, max]: Range) {
-  for (let i = min; i <= max; i++) {
-    yield i
+export class Range {
+  private constructor(readonly min: number, readonly max: number) {}
+  static from(min: number, max: number): Range {
+    assert(max > min, `Max must be bigger than min ( ${max} > ${min} )`)
+    return new Range(min, max)
+  }
+  containsValue(value: number) {
+    return this.min <= value && value <= this.max
+  }
+  containsRange(range: Range) {
+    return this.min <= range.min && this.max >= range.max
+  }
+  toString() {
+    return `${this.min}-${this.max}`
   }
 }
 
-function* makeAnyGenerator(valuesRange: Range, start?: number) {
-  for (const i of range(valuesRange)) {
-    if (start !== undefined && i < start) continue
-    yield i
-  }
-  //in case of rotation
-  return valuesRange[0]
-}
-function* makeListGenerator(value: string, start?: number) {
-  const values = value.split(',').map(Number)
-  for (const i of values) {
-    if (start !== undefined && i < start) continue
-    yield i
-  }
-  //in case of rotation
-  return values[0]
-}
-function* makeRangeGenerator(value: string, start?: number) {
-  const [min, max] = value.split('-').map(Number)
-  for (let i = min; i <= max; i++) {
-    if (start !== undefined && i < start) continue
-    yield i
-  }
-  // in case of rotation
-  return min
-}
-function* makeStepGenerator(value: string, valuesRange: Range, start?: number) {
-  //TODO handle more complicated stuff like 3-20/2 - At every 2nd minute from 3 through 20.
-  const [_, divider] = value.split('/').map(Number)
-    
-  for (const i of range(valuesRange)) {
-        if (i % divider === 0 && start !== undefined && i >= start) yield i
-  }
-  //in case of rotation
-  return 0
-}
-function* makeExactGenerator(value: string, start?: number) {
-  const v = Number(value)
-  //in case of rotation
-  if (start !== undefined && start > v) return v
-  yield v
-  //in case of rotation
-  return v
-}
+export const union = (...ranges: Range[]): Range =>
+  Range.from(
+    Math.max(...ranges.map(r => r.min)),
+    Math.min(...ranges.map(r => r.max))
+  )
 
-type FieldUnit = 'minutes' | 'hours' | 'days' | 'months'
-class Field {
+type FieldUnit = 'minutes' | 'hours' | 'days' | 'months' | 'years'
+abstract class Field {
   private static RANGES: Record<FieldUnit, Range> = {
-    minutes: [0, 59],
-    hours: [0, 23],
-    days: [1, 31],
-    months: [1, 12]
+    minutes: Range.from(0, 59),
+    hours: Range.from(0, 23),
+    days: Range.from(1, 31),
+    months: Range.from(1, 12),
+    years: Range.from(0, Number.MAX_SAFE_INTEGER)
   }
-  private constructor(
-    private type: FieldType,
-    private value: string,
-    private unit: FieldUnit
+  public stepNext = false
+  public resetPrev = false
+
+  protected constructor(
+    protected pattern: string,
+    public unit: FieldUnit,
+    protected range: Range,
+    public value: number
   ) {}
-  static from(value: string, unit: FieldUnit): Field {
-    let type = FieldType.ANY
-    if (value.includes('/')) type = FieldType.STEP
-    else if (value.includes(',')) type = FieldType.LIST
-    else if (value.includes('-')) type = FieldType.RANGE
-    else if (value.includes('*')) type = FieldType.ANY
-    else type = FieldType.EXACT
-    return new Field(type, value, unit)
+
+  static from(pattern: string, unit: FieldUnit, value: number): Field {
+    const range = Field.RANGES[unit]
+    if (pattern.includes(',')) return new ListField(pattern, unit, range, value)
+    else if (pattern.includes('-') || pattern.includes('*'))
+      return new RangeField(pattern, unit, range, value)
+    return new ExactField(pattern, unit, range, value)
   }
-  //TODO deprecate in favor of next
-  getGenerator(start?: number) {
-    const { unit, value, type } = this
-    switch (type) {
-      case FieldType.ANY:
-        return makeAnyGenerator(Field.RANGES[unit], start)
-      case FieldType.LIST:
-        return makeListGenerator(value, start)
-      case FieldType.RANGE:
-        return makeRangeGenerator(value, start)
-      case FieldType.STEP:
-        return makeStepGenerator(value, Field.RANGES[unit], start)
-      case FieldType.EXACT:
-        return makeExactGenerator(value, start)
+
+  abstract step(start?: number): void
+  abstract reset(): void
+}
+class RangeField extends Field {
+  step(start: number = this.value) {
+    log('STEP', this.unit)
+    const [pattern, dividerString] = this.pattern.split('/')
+    const items = pattern.includes('*')
+      ? [this.range.min, this.range.max]
+      : pattern.split('-').map(Number)
+
+    const [lo, hi] = items
+
+    let divider = 0
+    if (dividerString) {
+      divider = Number(dividerString)
+      assert(
+        Number.isInteger(divider),
+        `Range skip must be a numer ${this.pattern} -> ${dividerString}`
+      )
+      assert(
+        divider > 0,
+        `Range skip must be greater than 0 ${this.pattern} -> ${divider}`
+      )
+    }
+
+    assert(items.length === 2, `Range must give 2 numbers ${pattern}`)
+    assert(
+      [lo, hi].map(Number.isInteger).reduce((a, b) => a && b),
+      `Range must give 2 numbers ${pattern}`
+    )
+    const givenRange = Range.from(lo, hi)
+    assert(
+      this.range.containsRange(givenRange),
+      `Range ${givenRange} is not contained by the unit range for ${this.unit}(${this.range})`
+    )
+
+    const range = union(this.range, givenRange)
+    if (
+      range.containsValue(start) &&
+      (!divider || (start + this.range.min) % divider === 0)
+    ) {
+      this.resetPrev = start > this.value
+      this.value = start
+      this.stepNext = false
+      log('return?')
+      return
+    }
+    this.unit === 'months' && log('continue')
+    let next = Math.max(start, range.min) + 1
+    if (divider) {
+      while (next % divider !== 0) {
+        next++
+      }
+    }
+
+    this.stepNext = next > range.max
+    this.value = this.stepNext ? range.min : next
+    this.resetPrev = true
+  }
+  reset() {
+    if (this.pattern.includes('*')) {
+      this.value = this.range.min
+    } else {
+      this.value = Number(this.pattern.split('-')[0])
     }
   }
-  //TODO implement
-  next(): { value: number; reset: boolean } {
-    return { value: 3, reset: false }
+}
+class ListField extends Field {
+  step(start: number = this.value) {
+    const values = this.pattern.split(',').map(Number)
+    assert(
+      values.map(Number.isInteger).reduce((a, b) => a && b),
+      `List must give only numbers ${this.pattern}`
+    )
+    assert(
+      this.range.containsRange(
+        Range.from(values[0], values[values.length - 1])
+      ),
+      `List ${this.pattern} is not contained by the unit range for ${this.unit}(${this.range})`
+    )
+    //TODO assert all values are incremental
+    values.sort()
+
+    if (start === this.value && values.includes(start)) {
+      this.stepNext = false
+      this.resetPrev = false
+      return
+    }
+
+    if (start > values[values.length - 1]) {
+      this.value = values[0]
+      this.stepNext = true
+      this.resetPrev = true
+      return
+    }
+    for (const i of values) {
+      if (i < start) continue
+      this.value = i
+      this.resetPrev = true
+      this.stepNext = false
+    }
+  }
+
+  reset() {
+    this.value = Number(this.pattern.split(',')[0])
+  }
+}
+
+class ExactField extends Field {
+  step(start: number = this.value) {
+    const value = Number(this.pattern)
+    assert(
+      Number.isInteger(value),
+      `${this.unit} is not a number (${this.pattern})`
+    )
+
+    if (start === value) {
+      this.resetPrev = false
+      this.stepNext = false
+      return
+    }
+
+    this.value = value
+    this.stepNext = start > this.value
+    this.resetPrev = start !== this.value
+  }
+  reset() {
+    this.value = Number(this.pattern)
   }
 }
 
@@ -120,17 +209,18 @@ export class Cron {
   static from = (pattern: string): Cron => {
     const [m, h, d, mo] = pattern.split(' ')
 
-    const minutes = Field.from(m, 'minutes')
-    const hours = Field.from(h, 'hours')
-    const days = Field.from(d, 'days')
-    const months = Field.from(mo, 'months')
+    const minutes = Field.from(m, 'minutes', 0)
+    const hours = Field.from(h, 'hours', 0)
+    const days = Field.from(d, 'days', 0)
+    const months = Field.from(mo, 'months', 0)
+    const years = Field.from('*', 'years', 0)
 
-    return new Cron([minutes, hours, days, months], pattern)
+    return new Cron([minutes, hours, days, months, years], pattern)
   }
 
   next = (from?: Date) => {
     const now = from || new Date()
-    console.log('Calculating next hit from ', now)
+    log('Calculating next hit from ', now)
 
     const minutes = now.getMinutes()
     const hours = now.getHours()
@@ -138,52 +228,57 @@ export class Cron {
     const months = now.getMonth() + 1
     const years = now.getFullYear()
 
+    const clock = [minutes, hours, days, months, years]
+    for (let i = 0; i < clock.length; i++) {
+      this.fields[i].value = clock[i]
+    }
+
     const pad = (s: string, n = 10) =>
       s
         .split(' ')
         .map(s => s.padStart(n))
         .join('')
 
-    console.log(pad(''), pad('m h d mo w'))
-    console.log(pad('pattern'), pad(this.pattern))
-    console.log(
-      pad('now'),
-      pad(`${minutes} ${hours} ${days} ${months} ${years}`)
-    )
+    log(pad(''), pad('m h d mo w'))
+    log(pad('pattern'), pad(this.pattern))
+    log(pad('now'), pad(`${minutes} ${hours} ${days} ${months} ${years}`))
 
-    const clock = [minutes, hours, days, months, years]
+    for (let i = 0; i < this.fields.length - 1; i++) {
+      let current = this.fields[i]
+      current.step()
+      log(
+        'bump',
+        current.unit,
+        current.value,
+        current.stepNext ? 'OVERFLOW' : '',
+        current.resetPrev ? 'RESET' : ''
+      )
 
-    for (let i = 0; i < clock.length - 1; i++) {
-      // console.log(clock[i], ...Object.values(this.fields[i]))
-      const field = this.fields[i]
-      const generator = field.getGenerator(clock[i])
-      const { value, done } = generator.next()
-      clock[i] = value
-      /**
-       * done indicates reset. in this case we need to bump the next value
-       * and reset all previous values to the first valid choice
-       * (ignoring the current time -> meaning not passing `start` to getGenerator)
-       */
-      if (done) {
-        clock[i + 1]++
-        for (let j = 0; j < i; j++) {
-          clock[j] = this.fields[j].getGenerator().next().value
+      while (current.stepNext) {
+        i++
+        current = this.fields[i]
+        current.step(current.value + 1)
+        log(
+          'bump',
+          current.unit,
+          current.value,
+          current.stepNext ? 'OVERFLOW' : '',
+          current.resetPrev ? 'RESET' : ''
+        )
+      }
+      log(current)
+      if (current.resetPrev) {
+        log('reset on', i)
+
+        for (let k = 0; k < i; k++) {
+          this.fields[k].reset()
         }
       }
     }
-    console.log(pad('result'), pad(clock.join(' ')))
-
-    const ret = clock.map(n => (n < 10 ? String(n).padStart(2, '0') : n))
+    log(pad('result'), pad(this.fields.map(f => f.value).join(' ')))
+    const ret = this.fields
+      .map(f => f.value)
+      .map(n => (n < 10 ? String(n).padStart(2, '0') : n))
     return `${ret[4]}-${ret[3]}-${ret[2]} ${ret[1]}:${ret[0]}:00`
-
-    // const date = new Date()
-    // date.setFullYear(clock[4])
-    // date.setMonth(clock[3])
-    // date.setDate(clock[2])
-    // date.setHours(clock[1])
-    // date.setMinutes(clock[0])
-    // date.setSeconds(0)
-    // date.setMilliseconds(0)
-    // return date
   }
 }
