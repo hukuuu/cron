@@ -77,7 +77,7 @@ abstract class Field {
 }
 class RangeField extends Field {
   step(start: number = this.value) {
-    log('STEP', this.unit)
+    log('STEP RANGE', this.unit)
     const [pattern, dividerString] = this.pattern.split('/')
     const items = pattern.includes('*')
       ? [this.range.min, this.range.max]
@@ -120,8 +120,9 @@ class RangeField extends Field {
       log('return?')
       return
     }
-    this.unit === 'months' && log('continue')
+    log(start, range.min)
     let next = Math.max(start, range.min) + 1
+    log(next)
     if (divider) {
       while (next % divider !== 0) {
         next++
@@ -140,49 +141,40 @@ class RangeField extends Field {
     }
   }
 }
+
 class ListField extends Field {
-  step(start: number = this.value) {
-    const values = this.pattern.split(',').map(Number)
-    assert(
-      values.map(Number.isInteger).reduce((a, b) => a && b),
-      `List must give only numbers ${this.pattern}`
-    )
-    assert(
-      this.range.containsRange(
-        Range.from(values[0], values[values.length - 1])
-      ),
-      `List ${this.pattern} is not contained by the unit range for ${this.unit}(${this.range})`
-    )
-    //TODO assert all values are incremental
-    values.sort()
-
-    if (start === this.value && values.includes(start)) {
-      this.stepNext = false
-      this.resetPrev = false
-      return
-    }
-
-    if (start > values[values.length - 1]) {
-      this.value = values[0]
-      this.stepNext = true
-      this.resetPrev = true
-      return
-    }
-    for (const i of values) {
-      if (i < start) continue
-      this.value = i
-      this.resetPrev = true
-      this.stepNext = false
-    }
+  private fields: Field[]
+  constructor(pattern: string, unit: FieldUnit, range: Range, value: number) {
+    super(pattern, unit, range, value)
+    this.fields = this.pattern
+      .split(',')
+      .map(pattern => Field.from(pattern, this.unit, this.value))
   }
+  step(start: number = this.value): void {
+    log('STEP LIST', this.unit)
+    for (const field of this.fields) {
+      log('step child', start)
+      field.step(start)
+    }
+    const first = this.fields.sort((f1, f2) => f1.value - f2.value)[0]
 
-  reset() {
-    this.value = Number(this.pattern.split(',')[0])
+    this.stepNext = first.stepNext
+    this.value = first.value
+    this.resetPrev = first.resetPrev
+  }
+  reset(): void {
+    this.value = this.fields
+      .map(field => {
+        field.reset()
+        return field.value
+      })
+      .reduce((a, b) => Math.min(a, b))
   }
 }
 
 class ExactField extends Field {
   step(start: number = this.value) {
+    log('STEP EXACT', this.unit)
     const value = Number(this.pattern)
     assert(
       Number.isInteger(value),
@@ -266,9 +258,9 @@ export class Cron {
           current.resetPrev ? 'RESET' : ''
         )
       }
-      log(current)
+      // log(current)
       if (current.resetPrev) {
-        log('reset on', i)
+        log('reset on', current.unit)
 
         for (let k = 0; k < i; k++) {
           this.fields[k].reset()

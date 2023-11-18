@@ -27,5 +27,7 @@ Deno.test(function parseTest() {
   assertEquals(Cron.from('23 0-20/2 * * *').next(fixed), '2023-11-19 00:23:00')
   assertEquals(Cron.from('0 0,12 1 */2 *').next(fixed), '2024-01-01 00:00:00')
   assertEquals(Cron.from('0 4 8-14 * *').next(fixed), '2023-12-08 04:00:00')
+  assertEquals(Cron.from('2 * 1-8,12-16 * *').next(fixed), '2023-12-01 00:02:00')
+  assertEquals(Cron.from('2 * 1-8/5 * *').next(fixed), '2023-12-01 00:02:00')
 })
   
